@@ -1,6 +1,6 @@
-# TinyLang Interpreter
+# EngPy Interpreter
 
-TinyLang is a simple interpreted programming language implemented in Python. It features a Python-like syntax with indentation-based blocks, English-like keywords, and basic arithmetic and logical operations.
+EngPy is a simple interpreted programming language implemented in Python. It features a Python-like syntax with indentation-based blocks, English-like keywords, and basic arithmetic and logical operations.
 
 ## Features
 
@@ -54,7 +54,7 @@ if a or b:
 
 ## Running Programs
 
-Save your TinyLang code in a file with a `.tl` extension, e.g., `program.tl`.
+Save your EngPy code in a file with a `.tl` extension, e.g., `program.tl`.
 
 Run the interpreter:
 ```
@@ -106,7 +106,7 @@ print max
 - **Evaluator**: Interprets the AST in a simple environment.
 - **Error Handling**: Basic syntax and runtime errors.
 
-## Extending TinyLang
+## Extending EngPy
 
 To add new features:
 1. Update the lexer for new tokens.
