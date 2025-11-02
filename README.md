@@ -113,4 +113,4 @@ To add new features:
 2. Modify the parser for new grammar rules.
 3. Extend the evaluator for new operations.
 
-Enjoy coding in TinyLang!
+Enjoy coding in EngPy!
