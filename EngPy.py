@@ -52,8 +52,10 @@ def tokenize(src):
                 c = other
                 if c in '+-*/%=<>!':
                     tokens.append(('OP', c))
-                elif c in '(){},:':
+                elif c in '(){},:[]':
                     tokens.append((c, c))
+                elif c == '.':
+                    tokens.append(('.', '.'))
                 else:
                     raise SyntaxError(f'Unknown token {c}')
     # Close all indents
@@ -134,6 +136,18 @@ class Parser:
             self.expect(':', ':')
             body = self.parse_block()
             return ('while', cond, body)
+        if t[0] == 'IDENT' and t[1] == 'def':
+            return self.parse_function_def()
+        if t[0] == 'IDENT' and t[1] == 'class':
+            return self.parse_class_def()
+        if t[0] == 'IDENT' and t[1] == 'return':
+            self.next()
+            expr = self.parse_expr()
+            return ('return', expr)
+        if t[0] == 'IDENT' and t[1] == 'import':
+            self.next()
+            name = self.expect('IDENT')[1]
+            return ('import', name)
         # assignment or expression
         if t[0] == 'IDENT':
             # lookahead for '='
@@ -168,6 +182,28 @@ class Parser:
             stmts.append(self.parse_stmt())
         self.expect('DEDENT', None)
         return stmts
+
+    def parse_function_def(self):
+        self.next()  # def
+        name = self.expect('IDENT')[1]
+        self.expect('(', '(')
+        params = []
+        if self.peek()[0] != ')':
+            params.append(self.expect('IDENT')[1])
+            while self.peek()[0] == ',':
+                self.next()
+                params.append(self.expect('IDENT')[1])
+        self.expect(')', ')')
+        self.expect(':', ':')
+        body = self.parse_block()
+        return ('def', name, params, body)
+
+    def parse_class_def(self):
+        self.next()  # class
+        name = self.expect('IDENT')[1]
+        self.expect(':', ':')
+        body = self.parse_block()
+        return ('class', name, body)
 
     # Expression parsing (precedence climbing)
     def parse_expr(self):
@@ -296,7 +332,39 @@ class Parser:
             return ('num', t[1])
         if t[0] == 'IDENT':
             self.next()
-            return ('var', t[1])
+            name = t[1]
+            # check for function call: ident ( args )
+            if self.peek()[0] == '(':
+                self.next()  # (
+                args = []
+                if self.peek()[0] != ')':
+                    args.append(self.parse_expr())
+                    while self.peek()[0] == ',':
+                        self.next()
+                        args.append(self.parse_expr())
+                self.expect(')', ')')
+                return ('call', name, args)
+            # check for attribute access: ident . ident
+            elif self.peek()[0] == '.':
+                self.next()  # .
+                attr = self.expect('IDENT')[1]
+                return ('attr', ('var', name), attr)
+            else:
+                return ('var', name)
+        if t[0] == 'IDENT' and t[1] == 'new':
+            self.next()
+            cls_name = self.expect('IDENT')[1]
+            return ('new', ('var', cls_name))
+        if t[0] == '[':
+            self.next()
+            items = []
+            if self.peek()[0] != ']':
+                items.append(self.parse_expr())
+                while self.peek()[0] == ',':
+                    self.next()
+                    items.append(self.parse_expr())
+            self.expect(']', ']')
+            return ('list', items)
         if t[0] == '(':
             self.next()
             node = self.parse_expr()
@@ -305,9 +373,50 @@ class Parser:
         raise SyntaxError(f'Unexpected token {t}')
 
 # Evaluator
+class Function:
+    def __init__(self, name, params, body, env):
+        self.name = name
+        self.params = params
+        self.body = body
+        self.env = env
+
+class List:
+    def __init__(self, items):
+        self.items = items
+
+    def append(self, item):
+        self.items.append(item)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        return self.items[idx]
+
+    def __setitem__(self, idx, val):
+        self.items[idx] = val
+
+class Class:
+    def __init__(self, name, body):
+        self.name = name
+        self.body = body
+
+class Instance:
+    def __init__(self, cls):
+        self.cls = cls
+        self.attrs = {}
+
 class Interpreter:
     def __init__(self):
         self.env = {}
+        self.builtins = {
+            'len': lambda x: len(x.items) if isinstance(x, List) else len(x),
+            'print': lambda x: print(x),
+            'abs': lambda x: abs(x),
+            'max': lambda *args: max(args),
+            'min': lambda *args: min(args),
+        }
+        self.env.update(self.builtins)
 
     def eval(self, node):
         kind = node[0]
@@ -317,6 +426,58 @@ class Interpreter:
             if name in self.env: return self.env[name]
             raise NameError(f'Undefined variable {name}')
         if kind == 'neg': return -self.eval(node[1])
+        if kind == 'list':
+            items = [self.eval(item) for item in node[1]]
+            return List(items)
+        if kind == 'call':
+            func_name = node[1]
+            args = [self.eval(arg) for arg in node[2]]
+            func = self.env.get(func_name)
+            if not func:
+                raise NameError(f'Undefined function {func_name}')
+            if isinstance(func, Function):
+                return self.call_function(func, args)
+            elif isinstance(func, tuple) and func[0] == 'method':
+                # method call
+                instance, method_stmt = func[1], func[2]
+                _, name, params, body = method_stmt
+                if params and params[0] == 'self':
+                    params = params[1:]
+                else:
+                    raise SyntaxError('Method must have self as first parameter')
+                return self.call_method(instance, name, params, body, args)
+            elif callable(func):
+                return func(*args)
+            else:
+                raise TypeError(f'{func_name} is not callable')
+        if kind == 'new':
+            # class instantiation
+            cls = self.eval(node[1])
+            if isinstance(cls, Class):
+                return Instance(cls)
+            else:
+                raise TypeError('Can only instantiate classes')
+        if kind == 'attr':
+            obj = self.eval(node[1])
+            attr = node[2]
+            if isinstance(obj, Instance):
+                if attr in obj.attrs:
+                    return obj.attrs[attr]
+                # look in class body for methods
+                for stmt in obj.cls.body:
+                    if stmt[0] == 'def' and stmt[1] == attr:
+                        # return bound method
+                        return ('method', obj, stmt)
+                raise AttributeError(f'Instance has no attribute {attr}')
+            elif isinstance(obj, List):
+                if attr == 'append':
+                    return lambda item: obj.append(item)
+                elif attr == 'len':
+                    return len(obj)
+                else:
+                    raise AttributeError(f'List has no attribute {attr}')
+            else:
+                raise AttributeError(f'Object has no attribute {attr}')
         if kind in ('+','-','*','/','%'):
             a = self.eval(node[1]); b = self.eval(node[2])
             if kind == '+': return a + b
@@ -362,6 +523,17 @@ class Interpreter:
         elif typ == 'while':
             while self.eval(stmt[1]):
                 self.exec_block(stmt[2])
+        elif typ == 'def':
+            _, name, params, body = stmt
+            self.env[name] = Function(name, params, body, self.env.copy())
+        elif typ == 'class':
+            _, name, body = stmt
+            self.env[name] = Class(name, body)
+        elif typ == 'return':
+            raise ReturnException(self.eval(stmt[1]))
+        elif typ == 'import':
+            _, name = stmt
+            self.import_module(name)
         elif typ == 'expr':
             self.eval(stmt[1])
         else:
@@ -370,6 +542,65 @@ class Interpreter:
     def exec_block(self, stmts):
         for s in stmts:
             self.exec_stmt(s)
+
+    def call_function(self, func, args):
+        if len(args) != len(func.params):
+            raise TypeError(f'Function {func.name} expects {len(func.params)} arguments, got {len(args)}')
+        # create new env with params
+        new_env = func.env.copy()
+        for param, arg in zip(func.params, args):
+            new_env[param] = arg
+        # save old env
+        old_env = self.env
+        self.env = new_env
+        try:
+            self.exec_block(func.body)
+            return None  # implicit return None
+        except ReturnException as e:
+            return e.value
+        finally:
+            self.env = old_env
+
+    def call_method(self, instance, name, params, body, args):
+        if len(args) != len(params):
+            raise TypeError(f'Method {name} expects {len(params)} arguments, got {len(args)}')
+        # create new env with self and params
+        new_env = self.env.copy()
+        new_env['self'] = instance
+        for param, arg in zip(params, args):
+            new_env[param] = arg
+        # save old env
+        old_env = self.env
+        self.env = new_env
+        try:
+            self.exec_block(body)
+            return None
+        except ReturnException as e:
+            return e.value
+        finally:
+            self.env = old_env
+
+    def import_module(self, name):
+        # simple import: assume name.tl file
+        filename = f'{name}.tl'
+        try:
+            with open(filename, 'r') as f:
+                src = f.read()
+            tokens = tokenize(src)
+            parser = Parser(tokens)
+            program = parser.parse()
+            # create a new interpreter for the module
+            mod_interp = Interpreter()
+            for s in program:
+                mod_interp.exec_stmt(s)
+            # add module's env to current env
+            self.env[name] = mod_interp.env
+        except FileNotFoundError:
+            raise ImportError(f'Module {name} not found')
+
+class ReturnException(Exception):
+    def __init__(self, value):
+        self.value = value
 
 def _raise(ex):
     raise ex
